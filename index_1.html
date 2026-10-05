@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<meta name="referrer" content="no-referrer">
+<title>請求書・領収証</title>
+<style>
+  :root { --green:#06c755; --ink:#222; --sub:#666; --line:#e3e3e3; --bg:#f5f6f7; --warn:#c0392b; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family: -apple-system, "Hiragino Sans", "Noto Sans JP", sans-serif; color:var(--ink); background:var(--bg); font-size:17px; line-height:1.6; }
+  header { background:#fff; border-bottom:1px solid var(--line); padding:14px 16px; font-weight:700; font-size:18px; }
+  main { padding:16px; max-width:640px; margin:0 auto; }
+  .card { background:#fff; border-radius:12px; padding:16px; margin-bottom:16px; box-shadow:0 1px 2px rgba(0,0,0,.05); }
+  h2 { font-size:18px; margin:0 0 12px; }
+  label { display:block; font-size:15px; color:var(--sub); margin:12px 0 4px; }
+  input { width:100%; font-size:20px; padding:12px; border:1px solid #ccc; border-radius:8px; }
+  input#code { letter-spacing:.15em; text-transform:uppercase; }
+  button { width:100%; font-size:18px; font-weight:700; padding:14px; border:0; border-radius:10px; background:var(--green); color:#fff; margin-top:16px; }
+  button.sub { background:#fff; color:var(--ink); border:1px solid #ccc; font-weight:400; }
+  button:disabled { opacity:.5; }
+  .err { color:var(--warn); margin-top:10px; font-size:15px; }
+  .note { color:var(--sub); font-size:14px; }
+  .month { border-top:1px solid var(--line); padding:12px 0; }
+  .month:first-of-type { border-top:0; }
+  .month-title { font-weight:700; margin-bottom:6px; }
+  .docs { display:flex; gap:8px; flex-wrap:wrap; }
+  .doc { flex:1 1 140px; margin:0; font-size:16px; padding:12px; }
+  .doc small { display:block; font-weight:400; font-size:11px; opacity:.85; }
+  #viewer { position:fixed; inset:0; background:#555; display:none; flex-direction:column; z-index:10; }
+  #viewer .bar { background:#fff; display:flex; align-items:center; padding:8px 12px; gap:8px; }
+  #viewer .bar span { flex:1; font-weight:700; }
+  #viewer .bar button { width:auto; margin:0; padding:8px 16px; font-size:16px; }
+  #pages { flex:1; overflow:auto; padding:8px; -webkit-overflow-scrolling:touch; }
+  #pages canvas { display:block; width:100%; height:auto; margin:0 auto 8px; background:#fff; }
+  .center { text-align:center; padding:40px 0; color:var(--sub); }
+</style>
+</head>
+<body>
+<header>請求書・領収証</header>
+<main id="app"><div class="center">読み込み中…</div></main>
+
+<div id="viewer">
+  <div class="bar"><span id="vtitle"></span><button class="sub" onclick="closeViewer()">閉じる</button></div>
+  <div id="pages"></div>
+</div>
+
+<script src="https://static.line-scdn.net/liff/edge/2/sdk.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script>
+// ===== 設定（ここだけ書き換える）=====
+const LIFF_ID = '2011864992-rRlCIam0';
+const GAS_URL = 'https://script.google.com/macros/s/AKfycbwzBgVFirURb8e8i1chqAzch7-DIaV3K9VKsS56F3S7cSreOZ2ZMTCSm6EYEF4sklKRXA/exec';
+const TEL     = '0566-28-0500';
+// ====================================
+
+pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+const app = document.getElementById('app');
+const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+async function api(action, body = {}) {
+  const res = await fetch(GAS_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'text/plain;charset=utf-8' },   // プリフライトを避ける
+    body: JSON.stringify({ action, idToken: liff.getIDToken(), ...body }),
+  });
+  const json = await res.json();
+  if (json.error === 'TOKEN') {           // トークン期限切れ → ログインし直し
+    liff.logout(); liff.login(); throw new Error('relogin');
+  }
+  return json;
+}
+
+async function start() {
+  try {
+    await liff.init({ liffId: LIFF_ID });
+    if (!liff.isLoggedIn()) { liff.login(); return; }
+    await showStatus();
+  } catch (e) {
+    if (e.message !== 'relogin') app.innerHTML = `<div class="card">読み込みに失敗しました。LINEのメニューから開き直してください。</div>`;
+  }
+}
+
+async function showStatus() {
+  app.innerHTML = '<div class="center">読み込み中…</div>';
+  const st = await api('status');
+  if (!st.ok) { app.innerHTML = `<div class="card err">${esc(st.error || 'エラー')}</div>`; return; }
+  if (!st.linked) { showRegister(true); return; }
+
+  let html = '';
+  for (const p of st.people) {
+    html += `<div class="card"><h2>${esc(p.name)}</h2>`;
+    if (!p.docs.length) html += `<div class="note">まだ書類はありません。</div>`;
+    const byYm = {};
+    p.docs.forEach(d => (byYm[d.ym] = byYm[d.ym] || []).push(d));
+    Object.keys(byYm).sort().reverse().forEach(ym => {
+      html += `<div class="month"><div class="month-title">${ym.slice(0,4)}年${Number(ym.slice(4))}月分（サービス提供月）</div><div class="docs">`;
+      byYm[ym].forEach(d => {
+        html += `<button class="doc ${d.kind === '領収証' ? 'sub' : ''}" onclick="openDoc('${esc(d.id)}')">${esc(d.kind)}<small>${esc(d.no)}</small></button>`;
+      });
+      html += `</div></div>`;
+    });
+    html += `</div>`;
+  }
+  html += `<button class="sub" onclick="showRegister(false)">別のご利用者を追加する</button>
+           <p class="note">表示されるのは直近の書類のみです。ご不明な点は ${TEL} までお電話ください。</p>`;
+  app.innerHTML = html;
+}
+
+function showRegister(first) {
+  app.innerHTML = `
+  <div class="card">
+    <h2>${first ? 'はじめての方へ' : 'ご利用者の追加'}</h2>
+    <p class="note">事業所からお渡しした「登録コードのご案内」に記載のコードと、ご利用者の生年月日を入力してください。</p>
+    <label for="code">登録コード（8文字）</label>
+    <input id="code" autocomplete="off" autocapitalize="characters" placeholder="ABCD-2345" maxlength="9">
+    <label for="birth">ご利用者の生年月日</label>
+    <input id="birth" type="date" min="1900-01-01" max="2010-12-31">
+    <div id="msg" class="err"></div>
+    <button id="regbtn" onclick="doRegister()">登録する</button>
+    ${first ? '' : '<button class="sub" onclick="showStatus()">戻る</button>'}
+  </div>
+  <p class="note">登録コードがお手元にない場合は ${TEL} までお電話ください。</p>`;
+}
+
+async function doRegister() {
+  const btn = document.getElementById('regbtn'), msg = document.getElementById('msg');
+  const code = document.getElementById('code').value, birth = document.getElementById('birth').value;
+  if (!code || !birth) { msg.textContent = '登録コードと生年月日を入力してください。'; return; }
+  btn.disabled = true; msg.textContent = '';
+  try {
+    const r = await api('register', { code, birth });
+    if (!r.ok) { msg.textContent = r.error; btn.disabled = false; return; }
+    await showStatus();
+  } catch (e) { msg.textContent = '通信に失敗しました。'; btn.disabled = false; }
+}
+
+async function openDoc(id) {
+  const v = document.getElementById('viewer'), pages = document.getElementById('pages');
+  document.getElementById('vtitle').textContent = '読み込み中…';
+  pages.innerHTML = ''; v.style.display = 'flex';
+  try {
+    const r = await api('download', { fileId: id });
+    if (!r.ok) { document.getElementById('vtitle').textContent = r.error; return; }
+    document.getElementById('vtitle').textContent = r.title;
+    const bin = atob(r.data), bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    const pdf = await pdfjsLib.getDocument({ data: bytes }).promise;
+    for (let n = 1; n <= pdf.numPages; n++) {
+      const page = await pdf.getPage(n);
+      const vp = page.getViewport({ scale: 2 });
+      const c = document.createElement('canvas');
+      c.width = vp.width; c.height = vp.height;
+      pages.appendChild(c);
+      await page.render({ canvasContext: c.getContext('2d'), viewport: vp }).promise;
+    }
+  } catch (e) {
+    if (e.message !== 'relogin') document.getElementById('vtitle').textContent = '表示できませんでした';
+  }
+}
+
+function closeViewer() {
+  document.getElementById('viewer').style.display = 'none';
+  document.getElementById('pages').innerHTML = '';   // 画面から消す
+}
+
+start();
+</script>
+</body>
+</html>
